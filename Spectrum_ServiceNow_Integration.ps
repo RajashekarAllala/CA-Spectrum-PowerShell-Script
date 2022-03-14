@@ -1,0 +1,235 @@
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+
+#powershell ./SNOW-Integration.ps1 "$DATE" "$TIME" "$MNAME" "$ALARMTITLE" "$AID" "$SEV" "$STATUS" "$ALARMSTATE" "$CAUSE" "$EVENTMSG"
+
+$AlarmDate = $args[0]
+$AlarmTime = $args[1]
+$MNAME = $args[2]
+$ALARMTITLE = $args[3]
+$AID = $args[4]
+$SEV = $args[5]
+$STATUS = $args[6]
+$ALARMSTATE = $args[7]
+$CAUSE = $args[8]
+$EVENTMSG = $args[9]
+$TOPONAME = $args[10]
+$MCLASS = $args[11]
+
+$TNAME = $TOPONAME -split ":"
+$TNAME = $TNAME[1]
+
+#echo $TOPONAME >> test.OUT
+
+#Model Class "MCLASS" values is matched and stored in Device Class "DCLASS" variable
+$DCLASS = switch($MCLASS) {
+            2 {"Switch"} #Example: replace with {"Network"} #Swicth
+            3 {"Router"}
+            4 {"Switch-Router"}
+            7 {"Link"}
+            9 {"Workstation-Server"}
+            12 {"Pingable"}
+            14 {"SNMP"}
+            15 {"Port"}
+            27 {"Firewall"}
+            40 {"Wireless"}
+            128 {"Wireless LAN Controller"}
+            139 {"Gateway"}
+        };
+
+#$pattern = '(?<=\s).*(?= is)'
+$pattern = '(?<=:\d\d\s-\s).*(?= is)'
+
+if(($CAUSE -match '5c40010') -Or ($CAUSE -match '5c40011') -Or ($CAUSE -match '5c40012')){
+    $KEY = $MNAME+"-"+[regex]::Matches($EVENTMSG,$pattern).value+"-"+$CAUSE+"-"+$DCLASS
+ } else {
+    $KEY = $MNAME+"-"+$CAUSE+"-"+$DCLASS
+ }
+
+
+#Get System Date as Current Date/Time
+$currTime = Get-Date
+
+$AKFile = "E:\win32app\Spectrum\SNOWNotifier\integration_log\AK.txt"
+$RKFile = "E:\win32app\Spectrum\SNOWNotifier\integration_log\RK.txt"
+
+$global:app_id = "abd48b913935f8504dgb9a5b28702ded"
+$global:app_secret = "-@d7MC{R*V"
+$global:username = "SpectrumEvent"
+$global:passwd = "12345"
+$global:requestUri = “https://<instance>.service-now.com/oauth_token.do"
+
+$global:requestHeader = @{
+       "ContentType"=“application/x-www-form-urlencoded”
+}
+
+#Function to Generate Access and Refresh Tokens
+function AccessToken ($app_id, $app_secret, $username, $passwd, $requestUri, $requestHeader) {
+    
+    Write-Host "Generate Access and Refresh Keys"
+    
+    $grantType = “password”
+    
+    $requestBody = “grant_type=$grantType&client_id=$app_id&client_secret=$app_secret&username=$userName&password=$passwd"
+    
+    $response = Invoke-RestMethod -Method POST -Uri $requestUri -Headers $requestHeader -Body $requestBody
+    
+    #Write Access Key and Refresh Key to respective files.
+    $response.access_token | Out-File -FilePath $AKFile
+    $response.refresh_token | Out-File -FilePath $RKFile
+    
+    return $response
+    
+}
+
+#Function to create Access Token using the Existing Refresh Token
+function RefreshToken ($app_id, $app_secret, $requestUri, $requestHeader) {
+    
+    Write-Host "Use Refresh Key to Generate the Access key"
+    
+    $refreshToken = Get-Content -Path $RKFile 
+    $grantType = “refresh_token”
+    
+    $requestBody = “grant_type=$grantType&client_id=$app_id&client_secret=$app_secret&refresh_token=$refreshToken"
+
+    Try {
+        $response = Invoke-RestMethod -Method POST -Uri $requestUri -Headers $requestHeader -Body $requestBody
+    }
+
+    Catch {
+            Write-Host "CATCH Block of the RefreshToken"
+            if($_.Exception.Message -match 'access_denied'){
+                $response = AccessToken 
+            } else {
+                Write-Host $currTime - ERROR - $_.Exception.Message
+                exit
+            }
+    }
+    
+    #Write Access Key to a file
+    $response.access_token | Out-File -FilePath $AKFile
+
+    return $response
+    
+}
+
+If ( !(Test-Path -Path $AKFile) -Or !(Test-Path -Path $RKFile) ) {
+    
+    Write-Host "Access Key file doesn't exist. Creating it."
+    $AKresponse = AccessToken $app_id $app_secret $username $passwd $requestUri $requestHeader
+    
+    $accessKey = $AKresponse.access_token
+    $refreshKey = $AKresponse.refresh_token
+    $accessKey_expiry = $AKresponse.expires_in
+} 
+
+#Read Access Key Generated Time. If the file doesn't exist, it will be created during the next steps
+$accessKeyTime = [datetime](ls $AKFile).LastWriteTime
+$totalAKDays = ($currTime - $accessKeyTime).Minutes
+
+Write-Host Access Key File Age: $totalAKDays minutes`n
+
+#Read Refresh Key Generated Time. If the file doesn't exist, it will be created during the next steps
+$refreshKeyTime = [datetime](ls $RKFile).LastWriteTime
+$totalRKDays = ($currTime - $refreshKeyTime).Minutes
+
+Write-Host Refresh Key Age: $totalRKDays minutes `n
+
+if($totalRKDays -ge 10){
+    #Generate Access Token and Refresh Token if the Refresh Key Age >= Refresh Key Expiration Time
+    
+    $AKresponse = AccessToken $app_id $app_secret $username $passwd $requestUri $requestHeader
+    
+    $accessKey = $AKresponse.access_token
+    $refreshKey = $AKresponse.refresh_token
+    $accessKey_expiry = $AKresponse.expires_in
+           
+} elseif($totalAKDays -ge 5) {
+    #Generating Access Token using the Refresh Token if the Access Key Age >= Access Key Expiration Time
+    
+    $RKresponse = RefreshToken $app_id $app_secret $requestUri $requestHeader
+    
+    $accessKey = $RKresponse.access_token
+    $refreshKey = $RKresponse.refresh_token
+    $accesskey_expiry = $RKresponse.expires_in
+         
+} else {
+    #Make use of Access Key as long as the Keys are not expired
+    Write-Host "Using the Existing Access Key"
+    
+    $accessKey = Get-Content -Path $AKFile
+   
+}
+
+
+#Code for REST API Call to create an Event Starts here
+
+
+
+$snowUri="https://<instance>.service-now.com/api/global/em/jsonv2"
+
+$header = @{
+ "Content-Type"="application/json"
+ "Authorization" = "Bearer $accessKey"
+}
+
+$body = "{
+  `"records`": [
+    {
+      `"source`": `"CASpectrum`",
+      `"event_class`": `"Spectrum`",
+      `"resource`": `"$MNAME`",
+      `"node`": `"$MNAME`",
+      `"cmdb_ci`": `"$MNAME`",
+      `"metric_name`": `"$ALARMTITLE`",
+      `"type`": `"$CAUSE-$TNAME`",
+      `"ci_type`": `"Hardware`",
+      `"message_key`": `"$KEY`",
+      `"severity`": `"$SEV`",
+      `"description`": `"$EVENTMSG`"
+    }
+  ]
+}"
+
+Try {
+    $snowResp = Invoke-RestMethod -Uri $snowUri -Method 'Post' -Body $body -Headers $header | ConvertTo-Html
+}
+
+Catch {
+        Write-Host "CATCH block of REST API Call"
+        if($_.Exception.Message -match 'Unauthorized'){
+            $AKresponse = AccessToken $app_id $app_secret $username $passwd $requestUri $requestHeader
+            $accessKey = $AKresponse.access_token
+
+        } else {
+            Write-Host $currTime - ERROR - $_.Exception.Message
+            exit
+        }
+
+        $header = @{
+            "Content-Type"="application/json"
+            "Authorization" = "Bearer $accessKey"
+        }
+
+    $snowResp = Invoke-RestMethod -Uri $snowUri -Method 'Post' -Body $body -Headers $header | ConvertTo-Html
+}
+
+Write-Host `n------------------EVENT DETAILS-------------------
+Write-Output ($snowResp.Split("}")).Split("=") | Select-String -Pattern 'inserted'
+echo "Topology Name $TNAME" >> test.OUT
+Write-Host `n-----------------------------------------------------
+
+<#
+Write-Output `n "Date: $AlarmDate" >> test.log
+Write-Output `n "Time: $AlarmTime" >> test.log
+Write-Output `n "Device: $MNAME" >> test.log
+Write-Output `n "Alarm: $ALARMTITLE" >> test.log
+Write-Output `n "Alarm ID: $AID" >> test.log
+Write-Output `n "Severity: $SEV" >> test.log
+Write-Output `n "Status: $STATUS" >> test.log
+Write-Output `n "State: $ALARMSTATE" >> test.log
+Write-Output `n "Cause ID: $CAUSE" >> test.log
+Write-Output `n "Event: $EVENTMSG" >> test.log #>
+
+
+#.\SNOW-Integration.ps1 "23-12-2021" "11:00 PM" "TESTM" "TEST ALARM" "1234" "2" "New" "OPEN" "f3245" "TEST MSG" "Universe:Network:USA:Clinet"
