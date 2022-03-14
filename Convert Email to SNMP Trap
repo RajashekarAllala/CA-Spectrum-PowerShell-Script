@@ -1,0 +1,117 @@
+# Connect to OUTLOOK Client
+
+Add-type -assembly "Microsoft.Office.Interop.Outlook" | out-null
+$olFolders = "Microsoft.Office.Interop.Outlook.olDefaultFolders" -as [type]
+$outlook = new-object -comobject outlook.application
+$namespace = $outlook.GetNameSpace("MAPI")
+
+ 
+
+# Read the InBox
+
+$folder = $namespace.getDefaultFolder($olFolders::olFolderInBox)
+
+ 
+
+# Set the Target Folder to move the read Mails - Create a sub-folder with any name under Inbox - Replace <Processed> with that folder name 
+
+$target=$folder.Folders['Processed']
+
+ 
+
+# Processing Begins here based on the matching subject
+
+$Test=$folder.Items | ?{$_.subject -match "Requestor Lock Exception" }
+
+ 
+
+# Loop through the all matched mails and process
+
+foreach ($mail in $Test){
+$mail | sort receivedtime -desc |
+%{
+         # Checks if the mail is in unread mode and processes it further to generate the trap
+
+         if($_.Unread -eq $true)
+         {
+               # Select only the Body content, process it to remove unwanted text & writes the content to a file
+
+               $Content=$mail | Select-Object Body
+               $Content=$Content -replace ' '.''
+               $Content > D:\test.txt
+
+               # Read the text file content and assign it to respective variables
+
+               Get-Content D:\test.txt | Select-String 'MsgID' -Context 0,2 | ForEach-Object {
+               $msgID = $_.Context.PostContext
+               }
+
+ 
+
+               Get-Content D:\test.txt | Select-String 'Critical Alert Count' -Context 0,2 | ForEach-Object {
+               $alertCount = $_.Context.PostContext
+               }
+
+               Get-Content D:\test.txt | Select-String 'Initial Action' -Context 0,2 | ForEach-Object {
+               $inAction = $_.Context.PostContext
+               $inAction=$inAction -replace '<mailto(.*?)>',''
+               }
+
+               Get-Content D:\test.txt | Select-String 'Last Action' -Context 0,2 | ForEach-Object {
+               $lastAction = $_.Context.PostContext
+               }
+
+               Get-Content D:\test.txt | Select-String 'Last Alert Occurred at' -Context 0,2 | ForEach-Object {
+               $lastOccur = $_.Context.PostContext
+               }
+
+               Get-Content D:\test.txt | Select-String 'Operator was' -Context 0,2 | ForEach-Object {
+               $Operator = $_.Context.PostContext
+               }
+
+               Get-Content D:\test.txt | Select-String 'Occurred on Node' -Context 0,2 | ForEach-Object {
+               $Node = $_.Context.PostContext
+               }
+
+              Get-Content D:\test.txt | Select-String 'KPI Value' -Context 0,2 | ForEach-Object {
+              $KPIValue = $_.Context.PostContext
+              }
+
+             Get-Content D:\test.txt | Select-String 'KPI Threshold' -Context 0,2 | ForEach-Object {
+             $KPIThreshold = $_.Context.PostContext
+             }
+
+            Get-Content D:\test.txt | Select-String 'Problem Correlation' -Context 0,2 | ForEach-Object {
+            $probCorrel = $_.Context.PostContext
+            }
+
+            Get-Content D:\test.txt | Select-String 'Line' -Context 0,2 | ForEach-Object {
+            $lineDesc = $_.Context.PostContext
+            }
+
+            $Details=Get-Content D:\test.txt | Select-String 'For more details' -Context 0,1
+            $Details=$Details -replace '> For more details about this Alert please see(.*?)<',''
+            $Details=$Details -replace 'For more general information see PDC Portal (.*?)>',''
+            $Details=$Details -replace '>(.*?.*)',''
+
+            # Reading Variables Ended here
+
+            # Sends the trap with the variables we parsed from mail - Use sendtrap (sysEDGE) or any 3rd party trap generators
+            TrapGen.exe v2 -d 10.1.1.1 -c readOnly -o 1.3.6.1.4.1.546.9.6.1 -x -i 10.16.21.231 -v 1.3.6.1.4.1.546.9.6.0 S "$msgID" -v 1.3.6.1.4.1.546.9.6.1 I "$alertCount" -v 1.3.6.1.4.1.546.9.6.2 S "$inAction" -v 1.3.6.1.4.1.546.9.6.3 S "$lastAction" -v 1.3.6.1.4.1.546.9.6.4 S "$lastOccur" -v 1.3.6.1.4.1.546.9.6.5 S "$Operator" -v 1.3.6.1.4.1.546.9.6.6 S "$Node" -v 1.3.6.1.4.1.546.9.6.7 S "$KPIValue" -v 1.3.6.1.4.1.546.9.6.8 S "$KPIThreshold" -v 1.3.6.1.4.1.546.9.6.9 S "$probCorrel" -v 1.3.6.1.4.1.546.9.6.10 S "$lineDesc" -v 1.3.6.1.4.1.546.9.6.11 S "$Details"
+
+            # Mark the mail as read after processing and generating the trap
+            $_.Unread=$false
+
+         
+
+            # Move the mail from InBox to target folder
+            $_.Move($target)
+         }
+   }
+}
+
+
+#If you use sysEDGE to send the traps.... replace the installation path of the SysEDGE based on your installation path.
+
+# Replace row 100 content with the Below 
+#C:\Program Files\CA\SystemEDGE\bin\sendtrap -v 1 -h 10.11.190.115 -c admin 1.3.6.1.4.1.546.9.6 6 1 1.3.6.1.4.1.546.9.6.0 -s "$msgID" 1.3.6.1.4.1.546.9.6.1 -i "$alertCount" 1.3.6.1.4.1.546.9.6.2 -s "$inAction" 1.3.6.1.4.1.546.9.6.3 -s "$lastAction" 1.3.6.1.4.1.546.9.6.4 -s "$lastOccur" 1.3.6.1.4.1.546.9.6.5 -s "$Operator" 1.3.6.1.4.1.546.9.6.6 -s "$Node" 1.3.6.1.4.1.546.9.6.7 -s "$KPIValue" 1.3.6.1.4.1.546.9.6.8 -s "$KPIThreshold" 1.3.6.1.4.1.546.9.6.9 -s "$probCorrel" 1.3.6.1.4.1.546.9.6.10 -s "$lineDesc" 1.3.6.1.4.1.546.9.6.11 -s "$Details"
